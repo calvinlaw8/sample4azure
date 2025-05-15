@@ -1,14 +1,35 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
 - main
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+# 所有作业强制串行执行
+jobs:
+- job: Build_and_Test
+  displayName: '构建与测试'
+  steps:
+  - script: echo "安装依赖..."
+    displayName: '安装依赖'
+
+  - script: echo "构建项目..."
+    displayName: '构建'
+
+  - script: echo "运行单元测试..."
+    displayName: '测试'
+
+- job: Deploy_Dev
+  displayName: '部署到开发环境'
+  dependsOn: Build_and_Test  # 依赖前一个作业
+  condition: succeeded()     # 仅当构建成功时执行
+  steps:
+  - script: echo "部署到开发环境..."
+    displayName: '开发环境部署'
+
+- job: Deploy_Prod
+  displayName: '部署到生产环境'
+  dependsOn: Deploy_Dev      # 依赖开发环境部署
+  condition: succeeded()     # 可在此处添加人工审批
+  steps:
+  - script: echo "部署到生产环境..."
+    displayName: '生产环境部署'
