@@ -7,124 +7,60 @@ on:
     branches: [ "main" ]
 
 env:
-  ACR_NAME: calvintestaksregistry
-  ACR_REGISTRY: calvintestaksregistry.azurecr.io
-  RESOURCE_GROUP: AKSKPI
-  CLUSTER_NAME: testaks
-  IMAGE_REPO: calvinlawpipelinesjavascriptdocker
-  IMAGE_PULL_SECRET: calvintestaksregistryf362-auth
-  MANIFEST_PATH: manifests/
+  MANIFEST_PATH: manifests/  # 必须与仓库实际路径一致
+  ARTIFACT_NAME: k8s-manifests
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: write  # 关键权限
       id-token: write
 
     steps:
-    - name: Checkout code
+    - name: Checkout with full history
       uses: actions/checkout@v4
-
-    - name: Azure Login
-      uses: azure/login@v1
       with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        fetch-depth: 0  # 解决浅克隆导致的路径问题
 
-    - name: Build and Push Image
+    - name: Validate Manifest Directory
       run: |
-        az acr build \
-          --registry ${{ env.ACR_NAME }} \
-          --image ${{ env.IMAGE_REPO }}:${{ github.sha }} \
-          --file Dockerfile \
-          --build-arg ENVIRONMENT=${{ github.event_name == 'pull_request' && 'staging' || 'production' }} .
+        if [ ! -d "${{ env.MANIFEST_PATH }}" ]; then
+          echo "::error::Manifest directory ${{ env.MANIFEST_PATH }} not found!"
+          exit 1
+        fi
+        echo "Directory contents:"
+        ls -la ${{ env.MANIFEST_PATH}}
 
-    - name: Upload Manifests
-      uses: actions/upload-artifact@v3
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4  # 必须使用v4版本
       with:
-        name: k8s-manifests
+        name: ${{ env.ARTIFACT_NAME }}
         path: ${{ env.MANIFEST_PATH }}
+        retention-days: 3
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      actions: read  # 下载需要read权限
       contents: read
       id-token: write
-      pull-requests: write  # PR 环境动态命名
-    environment: ${{ github.event_name == 'pull_request' && 'pr-preview' || 'production' }}
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      pull-requests: write
 
-    - name: Download Manifests
-      uses: actions/download-artifact@v3
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4  # 保持版本一致
       with:
-        name: k8s-manifests
+        name: ${{ env.ARTIFACT_NAME }}
         path: ${{ env.MANIFEST_PATH }}
 
-    - name: Azure Login
-      uses: azure/login@v1
-      with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    - name: Get K8s Credentials
-      uses: azure/aks-set-context@v3
-      with:
-        resource-group: ${{ env.RESOURCE_GROUP }}
-        cluster-name: ${{ env.CLUSTER_NAME }}
-        admin: false
-
-    # PR 专属部署逻辑
-    - name: Setup PR Namespace
-      if: github.event_name == 'pull_request'
+    - name: Verify Downloaded Files
       run: |
-        NAMESPACE=pr-${{ github.event.number }}
-        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-        echo "NAMESPACE=$NAMESPACE" >> $GITHUB_ENV
-
-    - name: Create Image Pull Secret
-      run: |
-        kubectl create secret docker-registry ${{ env.IMAGE_PULL_SECRET }} \
-          --docker-server=${{ env.ACR_REGISTRY }} \
-          --docker-username=${{ secrets.AZURE_CLIENT_ID }} \
-          --docker-password=${{ secrets.AZURE_CLIENT_SECRET }} \
-          -n ${{ env.NAMESPACE || 'default' }}
-
-    - name: Deploy Manifests
-      uses: Azure/k8s-deploy@v4
-      with:
-        action: deploy
-        manifests: |
-          ${{ env.MANIFEST_PATH }}/deployment.yml
-          ${{ env.MANIFEST_PATH }}/service.yml
-        images: ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}
-        namespace: ${{ env.NAMESPACE || 'default' }}
-        imagepullsecrets: ${{ env.IMAGE_PULL_SECRET }}
-
-    # 获取服务端点并评论到 PR
-    - name: Get Service Endpoint
-      if: github.event_name == 'pull_request'
-      id: get-endpoint
-      run: |
-        IP=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
-        PORT=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[0].spec.ports[0].port}')
-        echo "url=http://$IP:$PORT" >> $GITHUB_OUTPUT
-
-    - name: Post PR Comment
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v6
-      with:
-        script: |
-          const { url } = steps.get-endpoint.outputs
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `🚀 预览环境已部署！访问地址：${url}`
-          })
+        echo "Downloaded files:"
+        ls -la ${{ env.MANIFEST_PATH }}
+        if [ ! -f "${{ env.MANIFEST_PATH }}/deployment.yml" ]; then
+          echo "::error::deployment.yml missing!"
+          exit 1
+        fi
