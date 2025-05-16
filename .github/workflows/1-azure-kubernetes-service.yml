@@ -1,0 +1,66 @@
+name: AKS Deployment
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  MANIFEST_PATH: manifests/  # 必须与仓库实际路径一致
+  ARTIFACT_NAME: k8s-manifests
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # 关键权限
+      id-token: write
+
+    steps:
+    - name: Checkout with full history
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 解决浅克隆导致的路径问题
+
+    - name: Validate Manifest Directory
+      run: |
+        if [ ! -d "${{ env.MANIFEST_PATH }}" ]; then
+          echo "::error::Manifest directory ${{ env.MANIFEST_PATH }} not found!"
+          exit 1
+        fi
+        echo "Directory contents:"
+        ls -la ${{ env.MANIFEST_PATH}}
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4  # 必须使用v4版本
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ${{ env.MANIFEST_PATH }}
+        retention-days: 3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read  # 下载需要read权限
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4  # 保持版本一致
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ${{ env.MANIFEST_PATH }}
+
+    - name: Verify Downloaded Files
+      run: |
+        echo "Downloaded files:"
+        ls -la ${{ env.MANIFEST_PATH }}
+        if [ ! -f "${{ env.MANIFEST_PATH }}/deployment.yml" ]; then
+          echo "::error::deployment.yml missing!"
+          exit 1
+        fi
