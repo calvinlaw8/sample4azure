@@ -1,0 +1,19 @@
+apiVersion : apps/v1
+kind: Deployment
+metadata:
+  name: calvinlawpipelinesjavascriptdocker 
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: calvinlawpipelinesjavascriptdocker
+  template:
+    metadata:
+      labels:
+        app: calvinlawpipelinesjavascriptdocker 
+    spec:
+      containers:
+        - name: calvinlawpipelinesjavascriptdocker 
+          image: calvintestaksregistry.azurecr.io/calvinlawpipelinesjavascriptdocker
+          ports:
+          - containerPort: 8080
