@@ -1,0 +1,130 @@
+name: AKS Deployment
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  ACR_NAME: calvintestaksregistry
+  ACR_REGISTRY: calvintestaksregistry.azurecr.io
+  RESOURCE_GROUP: AKSKPI
+  CLUSTER_NAME: testaks
+  IMAGE_REPO: calvinlawpipelinesjavascriptdocker
+  IMAGE_PULL_SECRET: calvintestaksregistryf362-auth
+  MANIFEST_PATH: manifests/
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Build and Push Image
+      run: |
+        az acr build \
+          --registry ${{ env.ACR_NAME }} \
+          --image ${{ env.IMAGE_REPO }}:${{ github.sha }} \
+          --file Dockerfile \
+          --build-arg ENVIRONMENT=${{ github.event_name == 'pull_request' && 'staging' || 'production' }} .
+
+    - name: Upload Manifests
+      uses: actions/upload-artifact@v3
+      with:
+        name: k8s-manifests
+        path: ${{ env.MANIFEST_PATH }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write  # PR 环境动态命名
+    environment: ${{ github.event_name == 'pull_request' && 'pr-preview' || 'production' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Manifests
+      uses: actions/download-artifact@v3
+      with:
+        name: k8s-manifests
+        path: ${{ env.MANIFEST_PATH }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Get K8s Credentials
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.CLUSTER_NAME }}
+        admin: false
+
+    # PR 专属部署逻辑
+    - name: Setup PR Namespace
+      if: github.event_name == 'pull_request'
+      run: |
+        NAMESPACE=pr-${{ github.event.number }}
+        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+        echo "NAMESPACE=$NAMESPACE" >> $GITHUB_ENV
+
+    - name: Create Image Pull Secret
+      run: |
+        kubectl create secret docker-registry ${{ env.IMAGE_PULL_SECRET }} \
+          --docker-server=${{ env.ACR_REGISTRY }} \
+          --docker-username=${{ secrets.AZURE_CLIENT_ID }} \
+          --docker-password=${{ secrets.AZURE_CLIENT_SECRET }} \
+          -n ${{ env.NAMESPACE || 'default' }}
+
+    - name: Deploy Manifests
+      uses: Azure/k8s-deploy@v4
+      with:
+        action: deploy
+        manifests: |
+          ${{ env.MANIFEST_PATH }}/deployment.yml
+          ${{ env.MANIFEST_PATH }}/service.yml
+        images: ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}
+        namespace: ${{ env.NAMESPACE || 'default' }}
+        imagepullsecrets: ${{ env.IMAGE_PULL_SECRET }}
+
+    # 获取服务端点并评论到 PR
+    - name: Get Service Endpoint
+      if: github.event_name == 'pull_request'
+      id: get-endpoint
+      run: |
+        IP=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+        PORT=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[0].spec.ports[0].port}')
+        echo "url=http://$IP:$PORT" >> $GITHUB_OUTPUT
+
+    - name: Post PR Comment
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { url } = steps.get-endpoint.outputs
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `🚀 预览环境已部署！访问地址：${url}`
+          })
