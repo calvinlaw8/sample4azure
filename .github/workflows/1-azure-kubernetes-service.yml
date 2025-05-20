@@ -9,6 +9,8 @@ on:
 env:
   MANIFEST_PATH: manifests/  # 必须与仓库实际路径一致
   ARTIFACT_NAME: k8s-manifests
+  NAMESPACE: my-namespace  # 部署的目标命名空间
+  BLUE_GREEN_RATIO: 5,20,30,50,80,100  # 红蓝部署比例
 
 jobs:
   build:
@@ -64,3 +66,46 @@ jobs:
           echo "::error::deployment.yml missing!"
           exit 1
         fi
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: latest
+
+    - name: Authenticate to AKS
+      uses: azure/aks-set-context@v3
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+        resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+
+    - name: Perform Blue-Green Deployment
+      id: blue-green
+      run: |
+        # 获取当前部署的版本
+        CURRENT_VERSION=$(kubectl get deployment -n ${{ env.NAMESPACE }} my-app -o jsonpath='{.spec.template.metadata.labels.version}')
+        echo "Current version: $CURRENT_VERSION"
+
+        # 定义红蓝部署比例
+        RATIOS=(${BLUE_GREEN_RATIO//,/ })
+
+        # 逐步进行红蓝部署
+        for ratio in "${RATIOS[@]}"; do
+          echo "Deploying $ratio% traffic to new version..."
+          kubectl apply -f ${{ env.MANIFEST_PATH }}/deployment.yml --namespace ${{ env.NAMESPACE }}
+          kubectl set env deployment/my-app -n ${{ env.NAMESPACE }} VERSION=${{ github.sha }}
+          kubectl rollout status deployment/my-app -n ${{ env.NAMESPACE }} --timeout=300s
+
+          # 等待一段时间以观察新版本的表现
+          sleep 60
+        done
+
+        echo "Deployment completed successfully!"
+
+    - name: Rollback on Failure
+      if: failure()
+      run: |
+        echo "Rolling back to previous version..."
+        kubectl rollout undo deployment/my-app -n ${{ env.NAMESPACE }}
+        kubectl rollout status deployment/my-app -n ${{ env.NAMESPACE }} --timeout=300s
+        echo "Rollback completed!"
